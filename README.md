@@ -5,7 +5,9 @@
 
 This project is a continuation of the work done for the following talks:
 
-* [PyData Warsaw 2017 - Analysing flight safety data with python](https://github.com/AeroPython/pydata_warsaw2017_flight_safety)
+* [PyData Warsaw 2017 - Analysing flight safety data with python](https://github.com/AeroPython/pydata_warsaw2017_flight_safety):
+  - [Video](https://www.youtube.com/watch?v=8mly9yYdK0M)
+  - [Slides](http://nbviewer.jupyter.org/format/slides/github/AeroPython/pydata_warsaw2017_flight_safety/blob/master/slides.ipynb#/)
 * [PyData Madrid 2016 - Remove before flight: Analysing flight safety data with Python](https://github.com/AeroPython/remove-before-flight)
 
 
