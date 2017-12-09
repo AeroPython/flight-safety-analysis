@@ -404,8 +404,6 @@ FLIGHT_CREW_CATEGORICAL = (
     'crew_sex'
 )
 
-# "SELECT * FROM Occurrences WHERE ev_id IN (SELECT ev_id FROM aircraft WHERE ev_id IN (SELECT ev_id FROM events WHERE ev_type='ACC') AND far_part IN ('121 ', '125 ', '129 ', '135 '))"
-
 
 def get_codes_meaning(con, table, column):
     query = (
