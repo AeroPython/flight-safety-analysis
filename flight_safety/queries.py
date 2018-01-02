@@ -406,14 +406,6 @@ FLIGHT_CREW_CATEGORICAL = (
 )
 
 
-def get_codes_meaning(con, table, column):
-    query = (
-        "select distinct code_iaids, meaning from eADMSPUB_DataDictionary "
-        f"where \"Table\"='{table}' and \"Column\"='{column}'"
-    )
-    return pd.read_sql(query, con, index_col='code_iaids')
-
-
 def get_occurrences_accidents(con):
     occurrence_cols = ", ".join(OCCURRENCES_COLUMNS)
 
@@ -609,6 +601,13 @@ class AvallDB:
 
         return pd.read_sql(query, self.con, index_col='ev_id', **kwargs)
 
+    def get_codes_meaning(self, table, column):
+        query = (
+            "select distinct code_iaids, meaning from eADMSPUB_DataDictionary "
+            f"where \"Table\"='{table}' and \"Column\"='{column}'"
+        )
+        return pd.read_sql(query, self.con, index_col='code_iaids')
+
     def get_events(self):
         ev_cols_ = ", ".join(EVENTS_COLUMNS)
         query = (f"SELECT {ev_cols_} FROM events ")
@@ -666,8 +665,8 @@ class AvallDB:
         for c in list(AIRCRAFT_CATEGORICAL) + new_categorical_cols:
             aircrafts[c] = aircrafts[c].astype('category')
 
-        PHASE_FLT_SPEC_DICT = get_codes_meaning(
-            self.con, 'aircraft', 'phase_flt_spec'
+        PHASE_FLT_SPEC_DICT = self.get_codes_meaning(
+            'aircraft', 'phase_flt_spec'
         )
 
         # Change codes for names (ie. 570 to Landing)
