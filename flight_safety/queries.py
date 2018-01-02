@@ -466,9 +466,12 @@ class AvallDB:
                     f"{far_parts_}")
 
     def _get_conditions_query(self):
+        """Executes any method starting with _get_ev_ids so all the
+        filtering queries will be gathered here
+        """
+        sel_methods = [ii for ii in dir(self) if ii.startswith("_get_ev_ids")]
 
-        selections = [self._get_ev_ids_ev_type_query(),
-                      self._get_ev_ids_far_part_query()]
+        selections = [getattr(self, ii)() for ii in sel_methods]
 
         conditions = " AND ".join([f"ev_id IN ({sel})" for sel in selections])
 
