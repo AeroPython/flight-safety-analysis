@@ -414,80 +414,6 @@ def get_codes_meaning(con, table, column):
     return pd.read_sql(query, con, index_col='code_iaids')
 
 
-def get_aircrafts_accidents(con):
-    ac_columns = ", ".join(AIRCRAFT_COLUMNS)
-
-    query = (
-        f"SELECT {ac_columns} FROM aircraft WHERE ev_id IN "
-        "(SELECT ev_id FROM events WHERE ev_type='ACC' AND "
-        f"ev_date IS NOT NULL) AND far_part IN ({FAR_PARTS})"
-    )
-
-    aircrafts = pd.read_sql(query, con,
-                            parse_dates={'date_last_insp': DATE_FORMAT}
-                            )
-
-    for c in AIRCRAFT_NUMERIC:
-        aircrafts[c] = pd.to_numeric(aircrafts[c], errors='coerce')
-
-    # phase_flt_spec is parsed as numeric and this is used to get phases of
-    # flight with less detail (ie. "Takeoff - roll/run" -> "Takeoff)
-    aircrafts['phase_flt_spec_gross'] = ((aircrafts.phase_flt_spec // 10) * 10)
-
-    new_categorical_cols = ['phase_flt_spec_gross', 'phase_flt_spec']
-    for c in list(AIRCRAFT_CATEGORICAL) + new_categorical_cols:
-        aircrafts[c] = aircrafts[c].astype('category')
-
-    PHASE_FLT_SPEC_DICT = get_codes_meaning(con, 'aircraft', 'phase_flt_spec')
-
-    # Change codes for names (ie. 570 to Landing)
-    cats = rename_categories(aircrafts['phase_flt_spec_gross'].cat.categories,
-                             PHASE_FLT_SPEC_DICT)
-    aircrafts['phase_flt_spec_gross'].cat.rename_categories(cats, inplace=True)
-
-    cats = rename_categories(aircrafts['phase_flt_spec'].cat.categories,
-                             PHASE_FLT_SPEC_DICT)
-    aircrafts['phase_flt_spec'].cat.rename_categories(cats, inplace=True)
-
-    return aircrafts
-
-
-def get_aircrafts_all(con):
-    ac_columns = ", ".join(AIRCRAFT_COLUMNS)
-
-    query = (
-        f"SELECT {ac_columns} FROM aircraft "
-    )
-
-    aircrafts = pd.read_sql(query, con,
-                            parse_dates={'date_last_insp': DATE_FORMAT}
-                            )
-
-    for c in AIRCRAFT_NUMERIC:
-        aircrafts[c] = pd.to_numeric(aircrafts[c], errors='coerce')
-
-    # phase_flt_spec is parsed as numeric and this is used to get phases of
-    # flight with less detail (ie. "Takeoff - roll/run" -> "Takeoff)
-    aircrafts['phase_flt_spec_gross'] = ((aircrafts.phase_flt_spec // 10) * 10)
-
-    new_categorical_cols = ['phase_flt_spec_gross', 'phase_flt_spec']
-    for c in list(AIRCRAFT_CATEGORICAL) + new_categorical_cols:
-        aircrafts[c] = aircrafts[c].astype('category')
-
-    PHASE_FLT_SPEC_DICT = get_codes_meaning(con, 'aircraft', 'phase_flt_spec')
-
-    # Change codes for names (ie. 570 to Landing)
-    cats = rename_categories(aircrafts['phase_flt_spec_gross'].cat.categories,
-                             PHASE_FLT_SPEC_DICT)
-    aircrafts['phase_flt_spec_gross'].cat.rename_categories(cats, inplace=True)
-
-    cats = rename_categories(aircrafts['phase_flt_spec'].cat.categories,
-                             PHASE_FLT_SPEC_DICT)
-    aircrafts['phase_flt_spec'].cat.rename_categories(cats, inplace=True)
-
-    return aircrafts
-
-
 def get_occurrences_accidents(con):
     occurrence_cols = ", ".join(OCCURRENCES_COLUMNS)
 
@@ -718,3 +644,41 @@ class AvallDB:
         events['longitude'] = events['longitude'].apply(convert_lon)
 
         return events
+
+    def get_aircrafts(self):
+        ac_columns = ", ".join(AIRCRAFT_COLUMNS)
+
+        query = f"SELECT {ac_columns} FROM aircraft"
+
+        aircrafts = self._execute_query(
+            query, parse_dates={'date_last_insp': DATE_FORMAT}
+            )
+
+        for c in AIRCRAFT_NUMERIC:
+            aircrafts[c] = pd.to_numeric(aircrafts[c], errors='coerce')
+
+        # phase_flt_spec is parsed as numeric and this is used to get phases of
+        # flight with less detail (ie. "Takeoff - roll/run" -> "Takeoff)
+        aircrafts['phase_flt_spec_gross'] = (
+                (aircrafts.phase_flt_spec // 10) * 10)
+
+        new_categorical_cols = ['phase_flt_spec_gross', 'phase_flt_spec']
+        for c in list(AIRCRAFT_CATEGORICAL) + new_categorical_cols:
+            aircrafts[c] = aircrafts[c].astype('category')
+
+        PHASE_FLT_SPEC_DICT = get_codes_meaning(
+            self.con, 'aircraft', 'phase_flt_spec'
+        )
+
+        # Change codes for names (ie. 570 to Landing)
+        cats = rename_categories(
+            aircrafts['phase_flt_spec_gross'].cat.categories,
+            PHASE_FLT_SPEC_DICT)
+        aircrafts['phase_flt_spec_gross'].cat.rename_categories(cats,
+                                                                inplace=True)
+
+        cats = rename_categories(aircrafts['phase_flt_spec'].cat.categories,
+                                 PHASE_FLT_SPEC_DICT)
+        aircrafts['phase_flt_spec'].cat.rename_categories(cats, inplace=True)
+
+        return aircrafts
