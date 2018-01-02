@@ -2,6 +2,7 @@
 Queries to retrieve data from database
 """
 
+import sqlite3
 import pandas as pd
 
 from .utils import convert_lat, convert_lon, rename_categories
@@ -648,3 +649,93 @@ def get_flight_crew_accidents(con):
         flight_crew[c] = flight_crew[c].astype('category')
 
     return flight_crew
+
+
+class AvallDB:
+
+    def __init__(self, file, acc=True, inc=False, far_parts='ALL'):
+
+        self.con = sqlite3.connect(file)
+
+        self._acc = acc
+        self._inc = inc
+        self._far_parts = far_parts
+
+        # Index matching conditions above. If None when executing a query,
+        # they will be gathered.
+        self._ev_ids = None
+
+    def set_filtering_conditions(self, acc=None, inc=None, far_parts=None):
+
+        if acc:
+            self._acc = acc
+        if inc:
+            self._inc = inc
+        if far_parts:
+            self._far_parts = far_parts
+
+        # If conditions have changed, ev_ids must be gathered again
+        self._ev_ids = None
+
+        current_filters = {'acc': self._acc,
+                           'inc': self._inc,
+                           'far_parts': self._far_parts}
+
+        return current_filters
+
+    def _get_ev_ids_ev_type_query(self):
+
+        if self._acc and self._inc:
+            return ("SELECT ev_id FROM events WHERE ev_type='ACC' OR " 
+                    "ev_type='INC'")
+
+        elif self._acc:
+            return "SELECT ev_id FROM events WHERE ev_type='ACC'"
+
+        else:
+            return "SELECT ev_id FROM events WHERE ev_type='INC'"
+
+    def _get_ev_ids_far_part_query(self):
+
+        if isinstance(self._far_parts, str) and self._far_parts.upper() == 'ALL':
+            return "SELECT ev_id FROM aircraft"
+
+        else:
+            # Convert to string and add trailing space and enclose with ''
+            far_parts_ = ["'" + str(fp).strip() + ' ' + "'" for fp in
+                          self._far_parts]
+
+            # transform list to a string separated by ,
+            far_parts_ = "(" + ", ".join(far_parts_) + ")"
+            return ("SELECT ev_id FROM aircraft WHERE far_part IN "
+                    f"{far_parts_}")
+
+    def _get_conditions_query(self):
+
+        selections = [self._get_ev_ids_ev_type_query(),
+                      self._get_ev_ids_far_part_query()]
+
+        conditions = " AND ".join([f"ev_id IN ({sel})" for sel in selections])
+
+        return conditions
+
+    def _set_matching_ev_ids(self):
+
+        # Get conditions query to be written after WHERE
+        conds = self._get_conditions_query()
+        # Write query
+        query = f"SELECT ev_id FROM events WHERE {conds}"
+        # Get events matching conditions
+        ev_ids = pd.read_sql(query, self.con)['ev_id'].values
+
+        # Transform strings matching to string
+        self._ev_ids = "'" + "', '".join(ev_ids) + "'"
+
+    def _execute_query(self, query):
+
+        if self._ev_ids is None:
+            self._set_matching_ev_ids()
+
+        query = query + f" WHERE ev_id in ({self._ev_ids})"
+
+        return pd.read_sql(query, self.con)
