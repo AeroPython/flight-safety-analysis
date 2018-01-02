@@ -619,7 +619,7 @@ class AvallDB:
 
         return occurrences
 
-    def get_flight_time_accidents(self):
+    def get_flight_time(self):
         flight_time_cols = ", ".join(FLIGHT_TIME_COLS)
 
         query = f"SELECT {flight_time_cols} FROM flight_time"
