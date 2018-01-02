@@ -5,7 +5,8 @@ Queries to retrieve data from database
 import sqlite3
 import pandas as pd
 
-from .utils import convert_lat, convert_lon, rename_categories
+from .utils import convert_lat, convert_lon, rename_categories, \
+    combine_date_time
 
 DATE_FORMAT = '%m/%d/%y %H:%M:%S'
 TIME_FORMAT = '%H%M'
@@ -93,7 +94,6 @@ EVENTS_NUMERIC = (
     "inj_tot_n",
     "inj_tot_s",
     "inj_tot_t",
-    "ntsb_notf_tm",
     "vis_rvv",
     "wind_dir_deg",
     "wx_obs_dist",
@@ -414,63 +414,6 @@ def get_codes_meaning(con, table, column):
     return pd.read_sql(query, con, index_col='code_iaids')
 
 
-def get_events_accidents(con):
-    query = ("SELECT {cols} FROM events "
-             "WHERE ev_type='ACC' AND ev_date IS NOT NULL "
-             "AND ev_id IN (SELECT ev_id FROM aircraft WHERE "
-             "far_part IN ({far_parts}))".format(
-                  cols=", ".join(EVENTS_COLUMNS),
-                  far_parts=FAR_PARTS
-                )
-             )
-    events = pd.read_sql_query(query, con,
-                               index_col='ev_id',
-                               parse_dates={'ev_date': DATE_FORMAT,
-                                            'ev_time': TIME_FORMAT,
-                                            'ntsb_notf_date': DATE_FORMAT,
-                                            'ntsb_notf_tm': TIME_FORMAT
-                                            }
-                               )
-
-    for c in EVENTS_NUMERIC:
-        events[c] = pd.to_numeric(events[c], errors='coerce')
-
-    for c in EVENTS_CATEGORICAL:
-        events[c] = events[c].astype('category')
-
-    events['latitude'] = events['latitude'].apply(convert_lat)
-    events['longitude'] = events['longitude'].apply(convert_lon)
-
-    return events
-
-
-def get_events_all(con):
-    query = ("SELECT {cols} FROM events "
-             .format(
-                  cols=", ".join(EVENTS_COLUMNS)
-                )
-             )
-    events = pd.read_sql_query(query, con,
-                               index_col='ev_id',
-                               parse_dates={'ev_date': DATE_FORMAT,
-                                            'ev_time': TIME_FORMAT,
-                                            'ntsb_notf_date': DATE_FORMAT,
-                                            'ntsb_notf_tm': TIME_FORMAT
-                                            }
-                               )
-
-    for c in EVENTS_NUMERIC:
-        events[c] = pd.to_numeric(events[c], errors='coerce')
-
-    for c in EVENTS_CATEGORICAL:
-        events[c] = events[c].astype('category')
-
-    events['latitude'] = events['latitude'].apply(convert_lat)
-    events['longitude'] = events['longitude'].apply(convert_lon)
-
-    return events
-
-
 def get_aircrafts_accidents(con):
     ac_columns = ", ".join(AIRCRAFT_COLUMNS)
 
@@ -731,11 +674,47 @@ class AvallDB:
         # Transform strings matching to string
         self._ev_ids = "'" + "', '".join(ev_ids) + "'"
 
-    def _execute_query(self, query):
+    def _execute_query(self, query, **kwargs):
 
         if self._ev_ids is None:
             self._set_matching_ev_ids()
 
         query = query + f" WHERE ev_id in ({self._ev_ids})"
 
-        return pd.read_sql(query, self.con)
+        return pd.read_sql(query, self.con, index_col='ev_id', **kwargs)
+
+    def get_events(self):
+        ev_cols_ = ", ".join(EVENTS_COLUMNS)
+        query = (f"SELECT {ev_cols_} FROM events ")
+
+        events = self._execute_query(
+            query,
+            parse_dates={'ev_date': DATE_FORMAT,
+                         'ev_time': TIME_FORMAT,
+                         'ntsb_notf_date': DATE_FORMAT,
+                         'ntsb_notf_tm': TIME_FORMAT
+                         }
+        )
+
+        # Substitute ev_date and ev_time for a datetime col: ev_date_time
+        events['ev_date_time'] = events.apply(
+            combine_date_time, 1, args=('ev_date', 'ev_time')
+            )
+        events.drop(['ev_date', 'ev_time'], axis=1, inplace=True)
+
+        # Idem with ntsb_notf_date_tm
+        events['ntsb_notf_date_tm'] = events.apply(
+            combine_date_time, 1, args=('ntsb_notf_date', 'ntsb_notf_tm')
+            )
+        events.drop(['ntsb_notf_date', 'ntsb_notf_tm'], axis=1, inplace=True)
+
+        for c in EVENTS_NUMERIC:
+            events[c] = pd.to_numeric(events[c], errors='coerce')
+
+        for c in EVENTS_CATEGORICAL:
+            events[c] = events[c].astype('category')
+
+        events['latitude'] = events['latitude'].apply(convert_lat)
+        events['longitude'] = events['longitude'].apply(convert_lon)
+
+        return events

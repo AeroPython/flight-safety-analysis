@@ -3,6 +3,7 @@ Util functions
 """
 
 import numpy as np
+import pandas as pd
 
 
 def convert_lat(string):
@@ -47,3 +48,15 @@ def rename_categories(old_categories, codes_meaning):
         else:
             new_categories.append(cat)
     return new_categories
+
+
+def combine_date_time(df, date_col, time_col):
+
+    date = df[date_col].date()
+
+    try:
+        time = df[time_col].time()
+    except:
+        return date
+
+    return pd.datetime.combine(date, time)
