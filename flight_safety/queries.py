@@ -11,8 +11,6 @@ from .utils import convert_lat, convert_lon, rename_categories, \
 DATE_FORMAT = '%m/%d/%y %H:%M:%S'
 TIME_FORMAT = '%H%M'
 
-FAR_PARTS = "'121 ', '125 '"
-
 EVENTS_COLUMNS = (
     'ev_id',
     'ntsb_no',
