@@ -2,14 +2,14 @@
 Queries to retrieve data from database
 """
 
+import sqlite3
 import pandas as pd
 
-from .utils import convert_lat, convert_lon, rename_categories
+from .utils import convert_lat, convert_lon, rename_categories, \
+    combine_date_time
 
 DATE_FORMAT = '%m/%d/%y %H:%M:%S'
 TIME_FORMAT = '%H%M'
-
-FAR_PARTS = "'121 ', '125 '"
 
 EVENTS_COLUMNS = (
     'ev_id',
@@ -92,7 +92,6 @@ EVENTS_NUMERIC = (
     "inj_tot_n",
     "inj_tot_s",
     "inj_tot_t",
-    "ntsb_notf_tm",
     "vis_rvv",
     "wind_dir_deg",
     "wx_obs_dist",
@@ -405,246 +404,265 @@ FLIGHT_CREW_CATEGORICAL = (
 )
 
 
-def get_codes_meaning(con, table, column):
-    query = (
-        "select distinct code_iaids, meaning from eADMSPUB_DataDictionary "
-        f"where \"Table\"='{table}' and \"Column\"='{column}'"
-    )
-    return pd.read_sql(query, con, index_col='code_iaids')
-
-
-def get_events_accidents(con):
-    query = ("SELECT {cols} FROM events "
-             "WHERE ev_type='ACC' AND ev_date IS NOT NULL "
-             "AND ev_id IN (SELECT ev_id FROM aircraft WHERE "
-             "far_part IN ({far_parts}))".format(
-                  cols=", ".join(EVENTS_COLUMNS),
-                  far_parts=FAR_PARTS
-                )
-             )
-    events = pd.read_sql_query(query, con,
-                               index_col='ev_id',
-                               parse_dates={'ev_date': DATE_FORMAT,
-                                            'ev_time': TIME_FORMAT,
-                                            'ntsb_notf_date': DATE_FORMAT,
-                                            'ntsb_notf_tm': TIME_FORMAT
-                                            }
-                               )
-
-    for c in EVENTS_NUMERIC:
-        events[c] = pd.to_numeric(events[c], errors='coerce')
+class AvallDB:
 
-    for c in EVENTS_CATEGORICAL:
-        events[c] = events[c].astype('category')
-
-    events['latitude'] = events['latitude'].apply(convert_lat)
-    events['longitude'] = events['longitude'].apply(convert_lon)
-
-    return events
+    def __init__(self, file, acc=True, inc=False, far_parts='ALL'):
 
-
-def get_events_all(con):
-    query = ("SELECT {cols} FROM events "
-             .format(
-                  cols=", ".join(EVENTS_COLUMNS)
-                )
-             )
-    events = pd.read_sql_query(query, con,
-                               index_col='ev_id',
-                               parse_dates={'ev_date': DATE_FORMAT,
-                                            'ev_time': TIME_FORMAT,
-                                            'ntsb_notf_date': DATE_FORMAT,
-                                            'ntsb_notf_tm': TIME_FORMAT
-                                            }
-                               )
+        self.con = sqlite3.connect(file)
 
-    for c in EVENTS_NUMERIC:
-        events[c] = pd.to_numeric(events[c], errors='coerce')
+        self._acc = acc
+        self._inc = inc
+        self._far_parts = far_parts
 
-    for c in EVENTS_CATEGORICAL:
-        events[c] = events[c].astype('category')
+        # Index matching conditions above. If None when executing a query,
+        # they will be gathered.
+        self._ev_ids = None
 
-    events['latitude'] = events['latitude'].apply(convert_lat)
-    events['longitude'] = events['longitude'].apply(convert_lon)
+    def set_filtering_conditions(self, acc=None, inc=None, far_parts=None):
 
-    return events
+        if acc:
+            self._acc = acc
+        if inc:
+            self._inc = inc
+        if far_parts:
+            self._far_parts = far_parts
 
+        # If conditions have changed, ev_ids must be gathered again
+        self._ev_ids = None
 
-def get_aircrafts_accidents(con):
-    ac_columns = ", ".join(AIRCRAFT_COLUMNS)
+        current_filters = {'acc': self._acc,
+                           'inc': self._inc,
+                           'far_parts': self._far_parts}
 
-    query = (
-        f"SELECT {ac_columns} FROM aircraft WHERE ev_id IN "
-        "(SELECT ev_id FROM events WHERE ev_type='ACC' AND "
-        f"ev_date IS NOT NULL) AND far_part IN ({FAR_PARTS})"
-    )
+        return current_filters
 
-    aircrafts = pd.read_sql(query, con,
-                            parse_dates={'date_last_insp': DATE_FORMAT}
-                            )
+    def _get_ev_ids_ev_type_query(self):
 
-    for c in AIRCRAFT_NUMERIC:
-        aircrafts[c] = pd.to_numeric(aircrafts[c], errors='coerce')
+        if self._acc and self._inc:
+            return ("SELECT ev_id FROM events WHERE ev_type='ACC' OR " 
+                    "ev_type='INC'")
 
-    # phase_flt_spec is parsed as numeric and this is used to get phases of
-    # flight with less detail (ie. "Takeoff - roll/run" -> "Takeoff)
-    aircrafts['phase_flt_spec_gross'] = ((aircrafts.phase_flt_spec // 10) * 10)
+        elif self._acc:
+            return "SELECT ev_id FROM events WHERE ev_type='ACC'"
 
-    new_categorical_cols = ['phase_flt_spec_gross', 'phase_flt_spec']
-    for c in list(AIRCRAFT_CATEGORICAL) + new_categorical_cols:
-        aircrafts[c] = aircrafts[c].astype('category')
+        else:
+            return "SELECT ev_id FROM events WHERE ev_type='INC'"
 
-    PHASE_FLT_SPEC_DICT = get_codes_meaning(con, 'aircraft', 'phase_flt_spec')
+    def _get_ev_ids_far_part_query(self):
 
-    # Change codes for names (ie. 570 to Landing)
-    cats = rename_categories(aircrafts['phase_flt_spec_gross'].cat.categories,
-                             PHASE_FLT_SPEC_DICT)
-    aircrafts['phase_flt_spec_gross'].cat.rename_categories(cats, inplace=True)
+        if isinstance(self._far_parts, str) and self._far_parts.upper() == 'ALL':
+            return "SELECT ev_id FROM aircraft"
 
-    cats = rename_categories(aircrafts['phase_flt_spec'].cat.categories,
-                             PHASE_FLT_SPEC_DICT)
-    aircrafts['phase_flt_spec'].cat.rename_categories(cats, inplace=True)
+        else:
+            # Convert to string and add trailing space and enclose with ''
+            far_parts_ = ["'" + str(fp).strip() + ' ' + "'" for fp in
+                          self._far_parts]
 
-    return aircrafts
+            # transform list to a string separated by ,
+            far_parts_ = "(" + ", ".join(far_parts_) + ")"
+            return ("SELECT ev_id FROM aircraft WHERE far_part IN "
+                    f"{far_parts_}")
 
+    def _get_conditions_query(self):
+        """Executes any method starting with _get_ev_ids so all the
+        filtering queries will be gathered here
+        """
+        sel_methods = [ii for ii in dir(self) if ii.startswith("_get_ev_ids")]
 
-def get_aircrafts_all(con):
-    ac_columns = ", ".join(AIRCRAFT_COLUMNS)
+        selections = [getattr(self, ii)() for ii in sel_methods]
 
-    query = (
-        f"SELECT {ac_columns} FROM aircraft "
-    )
+        conditions = " AND ".join([f"ev_id IN ({sel})" for sel in selections])
 
-    aircrafts = pd.read_sql(query, con,
-                            parse_dates={'date_last_insp': DATE_FORMAT}
-                            )
+        return conditions
 
-    for c in AIRCRAFT_NUMERIC:
-        aircrafts[c] = pd.to_numeric(aircrafts[c], errors='coerce')
+    def _set_matching_ev_ids(self):
 
-    # phase_flt_spec is parsed as numeric and this is used to get phases of
-    # flight with less detail (ie. "Takeoff - roll/run" -> "Takeoff)
-    aircrafts['phase_flt_spec_gross'] = ((aircrafts.phase_flt_spec // 10) * 10)
+        # Get conditions query to be written after WHERE
+        conds = self._get_conditions_query()
+        # Write query
+        query = f"SELECT ev_id FROM events WHERE {conds}"
+        # Get events matching conditions
+        ev_ids = pd.read_sql(query, self.con)['ev_id'].values
 
-    new_categorical_cols = ['phase_flt_spec_gross', 'phase_flt_spec']
-    for c in list(AIRCRAFT_CATEGORICAL) + new_categorical_cols:
-        aircrafts[c] = aircrafts[c].astype('category')
+        # Transform strings matching to string
+        self._ev_ids = "'" + "', '".join(ev_ids) + "'"
 
-    PHASE_FLT_SPEC_DICT = get_codes_meaning(con, 'aircraft', 'phase_flt_spec')
+    def _execute_query(self, query, **kwargs):
 
-    # Change codes for names (ie. 570 to Landing)
-    cats = rename_categories(aircrafts['phase_flt_spec_gross'].cat.categories,
-                             PHASE_FLT_SPEC_DICT)
-    aircrafts['phase_flt_spec_gross'].cat.rename_categories(cats, inplace=True)
+        if self._ev_ids is None:
+            self._set_matching_ev_ids()
 
-    cats = rename_categories(aircrafts['phase_flt_spec'].cat.categories,
-                             PHASE_FLT_SPEC_DICT)
-    aircrafts['phase_flt_spec'].cat.rename_categories(cats, inplace=True)
+        query = query + f" WHERE ev_id in ({self._ev_ids})"
 
-    return aircrafts
+        return pd.read_sql(query, self.con, index_col='ev_id', **kwargs)
 
+    def get_codes_meaning(self, table, column):
+        query = (
+            "select distinct code_iaids, meaning from eADMSPUB_DataDictionary "
+            f"where \"Table\"='{table}' and \"Column\"='{column}'"
+        )
+        return pd.read_sql(query, self.con, index_col='code_iaids')
 
-def get_occurrences_accidents(con):
-    occurrence_cols = ", ".join(OCCURRENCES_COLUMNS)
+    def get_events(self):
+        ev_cols_ = ", ".join(EVENTS_COLUMNS)
+        query = (f"SELECT {ev_cols_} FROM events ")
+
+        events = self._execute_query(
+            query,
+            parse_dates={'ev_date': DATE_FORMAT,
+                         'ev_time': TIME_FORMAT,
+                         'ntsb_notf_date': DATE_FORMAT,
+                         'ntsb_notf_tm': TIME_FORMAT
+                         }
+        )
+
+        # Substitute ev_date and ev_time for a datetime col: ev_date_time
+        events['ev_date_time'] = events.apply(
+            combine_date_time, 1, args=('ev_date', 'ev_time')
+            )
+        events.drop(['ev_date', 'ev_time'], axis=1, inplace=True)
+
+        # Idem with ntsb_notf_date_tm
+        events['ntsb_notf_date_tm'] = events.apply(
+            combine_date_time, 1, args=('ntsb_notf_date', 'ntsb_notf_tm')
+            )
+        events.drop(['ntsb_notf_date', 'ntsb_notf_tm'], axis=1, inplace=True)
 
-    query = (
-        f"SELECT {occurrence_cols} FROM Occurrences WHERE ev_id IN "
-        "(SELECT ev_id FROM events WHERE ev_type='ACC' AND "
-        "ev_date IS NOT NULL) AND ev_id IN (SELECT ev_id FROM aircraft "
-        f"WHERE far_part in ({FAR_PARTS}))"
-    )
+        for c in EVENTS_NUMERIC:
+            events[c] = pd.to_numeric(events[c], errors='coerce')
 
-    occurrences = pd.read_sql(query, con)
+        for c in EVENTS_CATEGORICAL:
+            events[c] = events[c].astype('category')
 
-    for c in OCCURENCES_NUMERIC:
-        occurrences[c] = pd.to_numeric(occurrences[c], errors='coerce')
+        events['latitude'] = events['latitude'].apply(convert_lat)
+        events['longitude'] = events['longitude'].apply(convert_lon)
 
-    # phase_flt_spec is parsed as numeric and this is used to get phases of
-    # flight with less detail (ie. "Takeoff - roll/run" -> "Takeoff)
-    occurrences['phase_flt_spec_gross'] = ((occurrences.Phase_of_Flight // 10) * 10)
+        return events
 
-    for c in list(OCCURRENCE_CATEGORICAL) + ['phase_flt_spec_gross']:
-        occurrences[c] = occurrences[c].astype('category')
+    def get_aircrafts(self):
+        ac_columns = ", ".join(AIRCRAFT_COLUMNS)
 
-    PHASE_FLT_SPEC = get_codes_meaning(con, 'Occurrences', 'Phase_of_Flight')
-    OCCU_CODE_SPEC = get_codes_meaning(con, 'Occurrences', 'Occurrence_Code')
+        query = f"SELECT {ac_columns} FROM aircraft"
 
-    cats = rename_categories(occurrences['Phase_of_Flight'].cat.categories,
-                             PHASE_FLT_SPEC)
-    occurrences['Phase_of_Flight'].cat.rename_categories(cats, inplace=True)
+        aircrafts = self._execute_query(
+            query, parse_dates={'date_last_insp': DATE_FORMAT}
+            )
 
-    cats = rename_categories(occurrences['phase_flt_spec_gross'].cat.categories,
-                             PHASE_FLT_SPEC)
-    occurrences['phase_flt_spec_gross'].cat.rename_categories(cats, inplace=True)
+        for c in AIRCRAFT_NUMERIC:
+            aircrafts[c] = pd.to_numeric(aircrafts[c], errors='coerce')
 
-    cats = rename_categories(occurrences['Occurrence_Code'].cat.categories,
-                             OCCU_CODE_SPEC)
-    occurrences['Occurrence_Code'].cat.rename_categories(cats, inplace=True)
+        # phase_flt_spec is parsed as numeric and this is used to get phases of
+        # flight with less detail (ie. "Takeoff - roll/run" -> "Takeoff)
+        aircrafts['phase_flt_spec_gross'] = (
+                (aircrafts.phase_flt_spec // 10) * 10)
 
-    return occurrences
+        new_categorical_cols = ['phase_flt_spec_gross', 'phase_flt_spec']
+        for c in list(AIRCRAFT_CATEGORICAL) + new_categorical_cols:
+            aircrafts[c] = aircrafts[c].astype('category')
 
+        PHASE_FLT_SPEC_DICT = self.get_codes_meaning(
+            'aircraft', 'phase_flt_spec'
+        )
 
-def get_flight_time_accidents(con):
-    flight_time_cols = ", ".join(FLIGHT_TIME_COLS)
+        # Change codes for names (ie. 570 to Landing)
+        cats = rename_categories(
+            aircrafts['phase_flt_spec_gross'].cat.categories,
+            PHASE_FLT_SPEC_DICT)
+        aircrafts['phase_flt_spec_gross'].cat.rename_categories(cats,
+                                                                inplace=True)
 
-    query = (
-        f"SELECT {flight_time_cols} FROM flight_time WHERE ev_id IN "
-        "(SELECT ev_id FROM events WHERE ev_type='ACC' AND "
-        "ev_date IS NOT NULL) AND ev_id IN (SELECT ev_id FROM aircraft WHERE "
-        f"far_part in ({FAR_PARTS}))"
-    )
+        cats = rename_categories(aircrafts['phase_flt_spec'].cat.categories,
+                                 PHASE_FLT_SPEC_DICT)
+        aircrafts['phase_flt_spec'].cat.rename_categories(cats, inplace=True)
 
-    flight_time = pd.read_sql(query, con)
+        return aircrafts
 
-    for c in FLIGHT_TIME_NUMERIC:
-        flight_time[c] = pd.to_numeric(flight_time[c], errors='coerce')
+    def get_occurrences(self):
+        occurrence_cols = ", ".join(OCCURRENCES_COLUMNS)
 
-    for c in FLIGHT_TIME_CATEGORICAL:
-        flight_time[c] = flight_time[c].astype('category')
+        query = f"SELECT {occurrence_cols} FROM Occurrences"
+        occurrences = self._execute_query(query)
 
-    return flight_time
+        for c in OCCURENCES_NUMERIC:
+            occurrences[c] = pd.to_numeric(occurrences[c], errors='coerce')
 
+        # phase_flt_spec is parsed as numeric and this is used to get phases of
+        # flight with less detail (ie. "Takeoff - roll/run" -> "Takeoff)
+        occurrences['phase_flt_spec_gross'] = (
+                (occurrences.Phase_of_Flight // 10) * 10)
 
-def get_seq_of_events_accidents(con):
-    seq_of_events_cols = ", ".join(SEQ_OF_EVETNS_COLUMNS)
+        for c in list(OCCURRENCE_CATEGORICAL) + ['phase_flt_spec_gross']:
+            occurrences[c] = occurrences[c].astype('category')
 
-    query = (
-        f"SELECT {seq_of_events_cols} FROM seq_of_events WHERE ev_id IN "
-        "(SELECT ev_id FROM events WHERE ev_type='ACC' AND "
-        "ev_date IS NOT NULL) AND ev_id IN (SELECT ev_id FROM aircraft WHERE "
-        f"far_part IN ({FAR_PARTS}))"
-    )
+        PHASE_FLT_SPEC = self.get_codes_meaning(
+            'Occurrences', 'Phase_of_Flight'
+        )
+        OCCU_CODE_SPEC = self.get_codes_meaning(
+            'Occurrences', 'Occurrence_Code'
+        )
 
-    seq_of_events = pd.read_sql(query, con)
+        cats = rename_categories(occurrences['Phase_of_Flight'].cat.categories,
+                                 PHASE_FLT_SPEC)
+        occurrences['Phase_of_Flight'].cat.rename_categories(cats,
+                                                             inplace=True)
 
-    # DROP GROUP_CODE = 0 because it is not codified
-    # seq_of_events = seq_of_events[seq_of_events.group_code != 0]
+        cats = rename_categories(
+            occurrences['phase_flt_spec_gross'].cat.categories,
+            PHASE_FLT_SPEC)
+        occurrences['phase_flt_spec_gross'].cat.rename_categories(cats,
+                                                                  inplace=True)
 
-    for c in SEQ_OF_EVENTS_NUMERIC:
-        seq_of_events[c] = pd.to_numeric(seq_of_events[c], errors='coerce')
+        cats = rename_categories(occurrences['Occurrence_Code'].cat.categories,
+                                 OCCU_CODE_SPEC)
+        occurrences['Occurrence_Code'].cat.rename_categories(cats,
+                                                             inplace=True)
 
-    for c in SEQ_OF_EVENTS_CATEGORICAL:
-        seq_of_events[c] = seq_of_events[c].astype('category')
+        return occurrences
 
-    return seq_of_events
+    def get_flight_time(self):
+        flight_time_cols = ", ".join(FLIGHT_TIME_COLS)
 
+        query = f"SELECT {flight_time_cols} FROM flight_time"
 
-def get_flight_crew_accidents(con):
+        flight_time = self._execute_query(query)
 
-    flight_crew_cols = ', '.join(FLIGHT_CREW_COLS)
-    
-    query = (
-        f"SELECT {flight_crew_cols} FROM Flight_Crew WHERE ev_id IN "
-        "(SELECT ev_id FROM events WHERE ev_type='ACC' AND "
-        "ev_date IS NOT NULL) AND ev_id IN (SELECT ev_id FROM aircraft "
-        f"WHERE far_part in ({FAR_PARTS}))"
-    )
-    flight_crew = pd.read_sql_query(query, con)
+        for c in FLIGHT_TIME_NUMERIC:
+            flight_time[c] = pd.to_numeric(flight_time[c], errors='coerce')
 
-    for c in FLIGHT_CREW_NUMERIC:
-        flight_crew[c] = pd.to_numeric(flight_crew[c], errors='coerce')
+        for c in FLIGHT_TIME_CATEGORICAL:
+            flight_time[c] = flight_time[c].astype('category')
 
-    for c in FLIGHT_CREW_CATEGORICAL:
-        flight_crew[c] = flight_crew[c].astype('category')
+        return flight_time
 
-    return flight_crew
+    def get_seq_of_events(self):
+        seq_of_events_cols = ", ".join(SEQ_OF_EVETNS_COLUMNS)
+
+        query = f"SELECT {seq_of_events_cols} FROM seq_of_events"
+
+        seq_of_events = self._execute_query(query)
+
+        # DROP GROUP_CODE = 0 because it is not codified
+        # seq_of_events = seq_of_events[seq_of_events.group_code != 0]
+
+        for c in SEQ_OF_EVENTS_NUMERIC:
+            seq_of_events[c] = pd.to_numeric(seq_of_events[c], errors='coerce')
+
+        for c in SEQ_OF_EVENTS_CATEGORICAL:
+            seq_of_events[c] = seq_of_events[c].astype('category')
+
+        return seq_of_events
+
+    def get_flight_crew(self):
+
+        flight_crew_cols = ', '.join(FLIGHT_CREW_COLS)
+
+        query = f"SELECT {flight_crew_cols} FROM Flight_Crew"
+        flight_crew = self._execute_query(query)
+
+        for c in FLIGHT_CREW_NUMERIC:
+            flight_crew[c] = pd.to_numeric(flight_crew[c], errors='coerce')
+
+        for c in FLIGHT_CREW_CATEGORICAL:
+            flight_crew[c] = flight_crew[c].astype('category')
+
+        return flight_crew
